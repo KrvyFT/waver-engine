@@ -1,0 +1,14 @@
+[package]
+name = "waver-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "cpal output stream and lock-free command drain."
+
+[dependencies]
+cpal.workspace = true
+rtrb.workspace = true
+thiserror.workspace = true
+waver-core.workspace = true
+waver-dsp.workspace = true
