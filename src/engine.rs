@@ -3,66 +3,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use waver_core::{
-    CompiledPatch, NodeId, NodeKind, ParamId, PortId, PortRef, RtCommand,
-};
-use waver_dsp::{Delay, Output, Process, ProcessCtx, Silence, Vco};
+use waver_core::{CompiledPatch, NodeId, NodeKind, PortId, PortRef, RtCommand};
+use waver_dsp::{Process, ProcessCtx, Silence, for_kind};
 
 /// Internal block size in frames. Independent of the device callback length.
 pub const BLOCK: usize = 64;
 
 const MAX_INPUTS: usize = 4;
-
-/// Live processor instances keyed by node id.
-enum ProcessorSlot {
-    Vco(Vco),
-    Output(Output),
-    Delay(Delay),
-    Silence(Silence),
-}
-
-impl ProcessorSlot {
-    fn process(&mut self, ctx: &mut ProcessCtx<'_>) {
-        match self {
-            Self::Vco(node) => node.process(ctx),
-            Self::Output(node) => node.process(ctx),
-            Self::Delay(node) => node.process(ctx),
-            Self::Silence(node) => node.process(ctx),
-        }
-    }
-
-    fn master(&self) -> Option<&[f32]> {
-        match self {
-            Self::Output(node) => Some(node.master_slice()),
-            _ => None,
-        }
-    }
-}
-
-fn build_processor(
-    kind: NodeKind,
-    node: NodeId,
-    params: &waver_core::ParamRegistry,
-) -> ProcessorSlot {
-    match kind {
-        NodeKind::Vco => {
-            let freq = params
-                .get(node, ParamId::new(0))
-                .unwrap_or_else(|| Arc::new(waver_core::ParamCell::new(440.0)));
-            let amp = params
-                .get(node, ParamId::new(1))
-                .unwrap_or_else(|| Arc::new(waver_core::ParamCell::new(0.5)));
-            let wave = params
-                .get(node, ParamId::new(2))
-                .unwrap_or_else(|| Arc::new(waver_core::ParamCell::new(0.0)));
-            ProcessorSlot::Vco(Vco::with_params(freq, amp, wave))
-        }
-        NodeKind::Output => ProcessorSlot::Output(Output::new()),
-        NodeKind::Delay => ProcessorSlot::Delay(Delay::new()),
-        NodeKind::Silence => ProcessorSlot::Silence(Silence),
-        _ => ProcessorSlot::Silence(Silence),
-    }
-}
 
 /// Pre-allocated mono port buffers for one output jack.
 struct PortBuffer {
@@ -86,7 +33,7 @@ pub struct Engine {
     channels: usize,
     patch: Arc<CompiledPatch>,
     order: Vec<NodeId>,
-    processors: HashMap<NodeId, ProcessorSlot>,
+    processors: HashMap<NodeId, Box<dyn Process>>,
     output_bufs: HashMap<(NodeId, PortId), PortBuffer>,
     scratch_in: [[f32; BLOCK]; MAX_INPUTS],
 }
@@ -123,8 +70,9 @@ impl Engine {
                 .schedule
                 .kind_of(node_id)
                 .unwrap_or(NodeKind::Silence);
-            let slot = build_processor(kind, node_id, &patch.params);
-            self.processors.insert(node_id, slot);
+            let processor = for_kind(kind, node_id, &patch.params)
+                .unwrap_or_else(|| Box::new(Silence) as Box<dyn Process>);
+            self.processors.insert(node_id, processor);
 
             let counts = kind.port_counts();
             for raw in 0..counts.outputs {
@@ -192,7 +140,7 @@ impl Engine {
 
         let mut local_out = [[0.0f32; BLOCK]; MAX_INPUTS];
 
-        if let Some(slot) = self.processors.get_mut(&node_id) {
+        if let Some(processor) = self.processors.get_mut(&node_id) {
             let mut outs0 = [&mut local_out[0][..frames]];
             let outputs: &mut [&mut [f32]] = if output_count > 0 {
                 &mut outs0
@@ -205,7 +153,7 @@ impl Engine {
                 inputs: &input_refs,
                 outputs,
             };
-            slot.process(&mut ctx);
+            processor.process(&mut ctx);
         }
 
         if output_count > 0 {
@@ -219,8 +167,8 @@ impl Engine {
     fn last_output_master(&self) -> Option<&[f32]> {
         for &node_id in self.order.iter().rev() {
             if self.patch.schedule.kind_of(node_id) == Some(NodeKind::Output) {
-                if let Some(slot) = self.processors.get(&node_id) {
-                    return slot.master();
+                if let Some(processor) = self.processors.get(&node_id) {
+                    return processor.master_slice();
                 }
             }
         }
