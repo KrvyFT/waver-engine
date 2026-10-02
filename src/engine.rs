@@ -66,10 +66,7 @@ impl Engine {
         self.output_bufs.clear();
 
         for &node_id in &self.order {
-            let kind = patch
-                .schedule
-                .kind_of(node_id)
-                .unwrap_or(NodeKind::Silence);
+            let kind = patch.schedule.kind_of(node_id).unwrap_or(NodeKind::Silence);
             let processor = for_kind(kind, node_id, &patch.params)
                 .unwrap_or_else(|| Box::new(Silence) as Box<dyn Process>);
             self.processors.insert(node_id, processor);
@@ -122,7 +119,10 @@ impl Engine {
 
         for port_raw in 0..input_count {
             let port = PortId::new(port_raw as u32);
-            let to = PortRef { node: node_id, port };
+            let to = PortRef {
+                node: node_id,
+                port,
+            };
             self.scratch_in[port_raw].fill(0.0);
             for source in self.patch.schedule.sources_to(to) {
                 if let Some(buf) = self.output_bufs.get(&(source.node, source.port)) {
@@ -214,5 +214,28 @@ mod tests {
         engine.process_block(&mut buf);
         let rms = (buf.iter().map(|s| s * s).sum::<f32>() / buf.len() as f32).sqrt();
         assert!(rms > 0.01, "expected non-silent output, rms={rms}");
+    }
+
+    #[test]
+    fn scope_tap_captures_the_engine_signal() {
+        let mut graph = Graph::new();
+        let vco = graph.insert(NodeKind::Vco);
+        let scope = graph.insert(NodeKind::Scope);
+        graph.connect(port(vco, 0), port(scope, 0));
+        let patch = Arc::new(graph.compile_patch(None).expect("compile"));
+
+        let mut engine = Engine::new(48_000.0, 1);
+        engine.apply_rt(waver_core::RtCommand::SwapSchedule(Arc::clone(&patch)));
+
+        let mut buf = [0.0f32; 64];
+        engine.process_block(&mut buf);
+
+        let tap = patch.params.tap(scope).expect("scope tap");
+        let mut captured = [0.0f32; 64];
+        assert_eq!(tap.snapshot(&mut captured), 64);
+        assert!(
+            captured.iter().any(|sample| *sample != 0.0),
+            "the monitor tap must mirror the audible signal"
+        );
     }
 }
