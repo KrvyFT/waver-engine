@@ -12,3 +12,7 @@ rtrb.workspace = true
 thiserror.workspace = true
 waver-core.workspace = true
 waver-dsp.workspace = true
+
+[features]
+default = []
+asio = ["cpal/asio"]
